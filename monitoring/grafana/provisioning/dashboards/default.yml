@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: Calculator
+    folder: Lab
+    type: file
+    disableDeletion: true
+    editable: false
+    options:
+      path: /var/lib/grafana/dashboards

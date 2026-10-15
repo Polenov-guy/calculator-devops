@@ -1,0 +1,26 @@
+rule_files:
+  - ../monitoring/alerts.yml
+evaluation_interval: 15s
+tests:
+  - interval: 15s
+    input_series:
+      - series: 'probe_success{job="blackbox",instance="app"}'
+        values: '0+0x8'
+      - series: 'up{job="blackbox",instance="app"}'
+        values: '1+0x8'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: CalculatorUnavailable
+        exp_alerts:
+          - exp_labels: {job: blackbox, instance: app, severity: critical}
+            exp_annotations: {summary: 'Calculator readiness probe failed'}
+  - interval: 15s
+    input_series:
+      - series: 'probe_success{job="blackbox",instance="app"}'
+        values: '1+0x8'
+      - series: 'up{job="blackbox",instance="app"}'
+        values: '1+0x8'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: CalculatorUnavailable
+        exp_alerts: []

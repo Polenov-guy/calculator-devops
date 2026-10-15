@@ -1,0 +1,86 @@
+name: calculator
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+services:
+  app:
+    image: ${APP_IMAGE:-calculator:local}
+    restart: unless-stopped
+    read_only: true
+    user: '10001:10001'
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      DB_PATH: /data/calculator.db
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    volumes: [calculator_data:/data]
+    ports: ['${APP_BIND:-0.0.0.0}:${APP_PORT:-80}:8080']
+    mem_limit: 256m
+    cpus: '0.5'
+    pids_limit: 128
+    logging: *logging
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    restart: unless-stopped
+    command: ['--config.file=/etc/prometheus/prometheus.yml', '--storage.tsdb.path=/prometheus', '--storage.tsdb.retention.time=15d', '--storage.tsdb.retention.size=3GB']
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports: ['127.0.0.1:9090:9090']
+    mem_limit: 768m
+    logging: *logging
+  grafana:
+    image: grafana/grafana:13.2.4
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Run scripts/init-env.sh first}
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: 'true'
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/calculator.json
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ['${GRAFANA_BIND:-0.0.0.0}:${GRAFANA_PORT:-3000}:3000']
+    mem_limit: 512m
+    logging: *logging
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    restart: unless-stopped
+    pid: host
+    command: ['--path.rootfs=/host', '--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/containers/storage/.+)($$|/)']
+    volumes: ['/:/host:ro,rslave']
+    mem_limit: 128m
+    logging: *logging
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.60.6
+    restart: unless-stopped
+    privileged: true
+    devices: [/dev/kmsg:/dev/kmsg]
+    command: ['--docker_only=true', '--store_container_labels=true', '--housekeeping_interval=15s']
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    mem_limit: 256m
+    logging: *logging
+  blackbox:
+    image: prom/blackbox-exporter:v0.29.0
+    restart: unless-stopped
+    command: ['--config.file=/etc/blackbox/config.yml']
+    volumes: ['./monitoring/blackbox.yml:/etc/blackbox/config.yml:ro']
+    mem_limit: 64m
+    logging: *logging
+volumes:
+  calculator_data:
+  prometheus_data:
+  grafana_data:

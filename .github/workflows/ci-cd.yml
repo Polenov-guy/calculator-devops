@@ -1,0 +1,140 @@
+name: Calculator CI-CD
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: calculator-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.9'
+          cache: true
+      - name: Test
+        run: bash scripts/test.sh
+      - name: Build independent application artifact
+        env:
+          VERSION: ${{ github.sha }}
+        run: |
+          bash scripts/build.sh
+          bash scripts/test-binary.sh
+          tar -czf calculator-linux-amd64.tar.gz -C dist calculator build-info.json SHA256SUMS data
+      - uses: actions/upload-artifact@v4
+        with:
+          name: calculator-linux-amd64
+          path: calculator-linux-amd64.tar.gz
+          retention-days: 90
+          if-no-files-found: error
+      - name: Create source deployment bundle
+        run: git archive --format=tar.gz --output=deploy-bundle.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-bundle
+          path: deploy-bundle.tar.gz
+          retention-days: 90
+  package:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: calculator-linux-amd64
+      - name: Restore the saved build, package and test
+        run: |
+          mkdir -p dist
+          tar -xzf calculator-linux-amd64.tar.gz -C dist
+          bash scripts/package.sh calculator:ci
+          bash scripts/integration-test.sh calculator:ci
+          bash scripts/init-env.sh
+          docker compose config -q
+          docker compose run --rm --no-deps --entrypoint promtool prometheus check config /etc/prometheus/prometheus.yml
+          docker run --rm --entrypoint promtool -v "$PWD:/src:ro" prom/prometheus:v3.15.0 test rules /src/tests/prometheus-rules.yml
+      - name: Publish immutable image
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tag="$repository:sha-$GITHUB_SHA"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag calculator:ci "$tag"
+          docker push "$tag"
+          docker pull "$tag"
+          image=$(docker image inspect "$tag" --format '{{index .RepoDigests 0}}')
+          [[ "$image" == "$repository@sha256:"* ]]
+          printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$image" > image-reference.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-reference
+          path: image-reference.txt
+  deploy:
+    needs: package
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: production
+    concurrency:
+      group: calculator-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: deploy-bundle
+      - name: Deploy by SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          IMAGE: ${{ needs.package.outputs.image }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9.-]+$ ]]
+          [[ "$IMAGE" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]]
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          remote="$DEPLOY_USER@$DEPLOY_HOST"
+          release="/opt/calculator/releases/$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=yes "$remote" "mkdir -p '$release'"
+          scp -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=yes deploy-bundle.tar.gz "$remote:$release/source.tar.gz"
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=yes "$remote" "tar -xzf '$release/source.tar.gz' -C '$release' && APP_HOME=/opt/calculator bash '$release/scripts/deploy.sh' '$IMAGE' '$GITHUB_SHA'"
+  release:
+    needs: [build, package]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: calculator-linux-amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: deploy-bundle
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-reference
+      - name: Preserve submission artifacts in GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" calculator-linux-amd64.tar.gz deploy-bundle.tar.gz image-reference.txt --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes 'Built application, source deployment bundle and immutable Docker image reference.'

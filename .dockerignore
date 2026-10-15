@@ -1,0 +1,13 @@
+.git
+.env
+.deploy.env
+.state
+backups
+data/*.db
+data/*.db-*
+release
+*.zip
+
+**/__pycache__/
+**/*.pyc
+node_modules
